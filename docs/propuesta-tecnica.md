@@ -108,8 +108,13 @@ por la profundidad medida, así los anotadores no tienen que decidirla y el crit
 - **Anotación dispersa**: basta anotar 1 de cada n frames; los demás sirven como contexto temporal.
 - **Aumentos de datos** que imitan la variabilidad entre equipos: ganancia (desplazamiento aditivo),
   rango dinámico (escala), ruido, volteo y recorte.
-- **Preentrenamiento con clips sintéticos** (generador incluido, con máscaras exactas), luego
-  ajuste fino con clips neonatales anotados.
+- **Preentrenamiento** en dos fuentes, luego ajuste fino con clips neonatales anotados:
+  - **autosupervisado con clips reales sin anotar** (la biblioteca existente, sin necesidad de
+    hígado): la red reconstruye parches borrados del frame t usando la imagen y los frames vecinos.
+    Aprende el aspecto real de pleura, sombras, líneas A/B y consolidaciones antes de ver una
+    máscara ([guía](entrenamiento-local.md));
+  - **clips sintéticos** (generador incluido, con máscaras exactas), que aportan también las clases
+    que aún no tengan anotación real (hígado, vasos).
 
 ### 4.3 Métricas de la IA
 
@@ -251,7 +256,7 @@ fija referida al pulmón hace comparables zonas, pacientes y días.
 | Fase | Contenido | Entregable |
 |---|---|---|
 | **0. Protocolo y datos** | Preset bloqueado, clip hepático, comité de ética, anonimización, proyecto CVAT con la ontología | Primeros 20–30 pacientes con clips |
-| **1. Segmentación IA** | Preentrenamiento sintético + ajuste fino con anotación dispersa; U-Net y nnU-Net con folds por paciente | Modelo con Dice, sensibilidad de sombras y concordancia de IPA IA vs experto |
+| **1. Segmentación IA** | Preentrenamiento autosupervisado (biblioteca sin anotar) y sintético + ajuste fino con anotación dispersa; U-Net y nnU-Net con folds por paciente | Modelo con Dice, sensibilidad de sombras y concordancia de IPA IA vs experto |
 | **2. Movimiento** | Sustituir el índice de deslizamiento heurístico por un modelo temporal entrenado (deslizamiento, punto pulmonar, pulso) | Detector de NTX validado |
 | **3. Validación** | Fijar anclas y umbrales; test–retest; variabilidad hepática; validez convergente multicéntrica | qLUS-Neo validado |
 | **4. Producto** | Inferencia en tiempo real en tablet/PC, informe y tendencias, vía regulatoria | Versión clínica |
@@ -265,7 +270,8 @@ fija referida al pulmón hace comparables zonas, pacientes y días.
 | `src/qlus/etiquetas.py` | Ontología de 14 clases y colores |
 | `src/qlus/io.py` | DICOM (con regiones de ultrasonido y tamaño de píxel), video y `.npz` |
 | `src/qlus/sintetico.py` | Generador de clips sintéticos con máscaras exactas |
-| `src/qlus/modelos/unet.py` | U-Net 2D con contexto temporal |
+| `src/qlus/modelos.py` | U-Net 2D con contexto temporal |
+| `src/qlus/biblioteca.py` · `preentrenamiento.py` | Ingesta anonimizada de clips sin anotar y preentrenamiento autosupervisado |
 | `src/qlus/entrenamiento.py` · `inferencia.py` | Entrenamiento (partición por paciente, anotación dispersa) e inferencia con suavizado temporal |
 | `src/qlus/postproceso.py` | Línea pleural y exclusión autónoma de sombras costales |
 | `src/qlus/normalizacion.py` | Referencia hepática (uno y dos puntos) |

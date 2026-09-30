@@ -41,10 +41,15 @@ def _a_gris(arr: np.ndarray) -> np.ndarray:
     return np.clip(np.rint(arr), 0, 255).astype(np.uint8)
 
 
-def cargar_dicom(ruta: str | Path) -> Clip:
+def leer_dicom_crudo(ruta: str | Path) -> tuple[np.ndarray, tuple[float, float] | None,
+                                                tuple[int, int, int, int] | None, float, dict]:
+    """Píxeles sin convertir a gris (T, H, W) o (T, H, W, 3), tamaño del píxel en mm (o None),
+    región de imagen 2D (y0, y1, x0, x1) (o None), fps y metadatos del equipo."""
     import pydicom
 
     ds = pydicom.dcmread(str(ruta))
+    if "PixelData" not in ds:
+        raise ValueError(f"{ruta}: el DICOM no contiene imagen")
     try:
         from pydicom.pixels import pixel_array  # pydicom >= 3: convierte YBR a RGB
 
@@ -59,7 +64,6 @@ def cargar_dicom(ruta: str | Path) -> Clip:
     n_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
     if n_frames == 1:
         arr = arr[None]
-    frames = _a_gris(arr)
 
     mm = None
     region = None
@@ -72,11 +76,6 @@ def cargar_dicom(ruta: str | Path) -> Clip:
             break
     if mm is None and hasattr(ds, "PixelSpacing"):
         mm = (float(ds.PixelSpacing[0]), float(ds.PixelSpacing[1]))
-    if mm is None:
-        raise ValueError(f"{ruta}: el DICOM no informa el tamaño del píxel (SequenceOfUltrasoundRegions/PixelSpacing)")
-    if region is not None:
-        y0, y1, x0, x1 = region
-        frames = frames[:, y0:y1, x0:x1]
 
     fps = 20.0
     if getattr(ds, "CineRate", None):
@@ -86,6 +85,17 @@ def cargar_dicom(ruta: str | Path) -> Clip:
 
     meta = {"fuente": str(ruta), "fabricante": str(getattr(ds, "Manufacturer", "")),
             "modelo": str(getattr(ds, "ManufacturerModelName", ""))}
+    return arr, mm, region, fps, meta
+
+
+def cargar_dicom(ruta: str | Path) -> Clip:
+    arr, mm, region, fps, meta = leer_dicom_crudo(ruta)
+    if mm is None:
+        raise ValueError(f"{ruta}: el DICOM no informa el tamaño del píxel (SequenceOfUltrasoundRegions/PixelSpacing)")
+    frames = _a_gris(arr)
+    if region is not None:
+        y0, y1, x0, x1 = region
+        frames = frames[:, y0:y1, x0:x1]
     return Clip(frames=np.ascontiguousarray(frames), mm_por_pixel=mm, fps=fps, meta=meta)
 
 

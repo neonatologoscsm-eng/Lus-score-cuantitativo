@@ -1,6 +1,8 @@
 """Línea de comandos de qLUS-Neo.
 
   qlus sintetico      genera clips sintéticos (entrenamiento o un examen de demostración)
+  qlus biblioteca     prepara una biblioteca de clips SIN anotar (DICOM/video) → .npz anonimizados
+  qlus preentrenar    preentrenamiento autosupervisado con esos clips (no requiere anotación)
   qlus entrenar       entrena la segmentación con clips .npz anotados
   qlus analizar       segmenta (IA o anotación) y cuantifica un examen completo
   qlus exportar-nnunet  exporta clips anotados a formato nnU-Net v2
@@ -55,11 +57,29 @@ def _cmd_sintetico(a):
     print(f"{a.n} clips sintéticos en {salida}")
 
 
+def _cmd_biblioteca(a):
+    from .biblioteca import ingerir
+
+    r = ingerir(a.origen, a.salida, max_frames=a.max_frames, lado_max=a.lado_max, umbral_color=a.umbral_color,
+                mosaicos=not a.sin_mosaicos)
+    print(f"→ {a.salida}  (detalle por archivo en {r['inventario']})")
+
+
+def _cmd_preentrenar(a):
+    from .preentrenamiento import preentrenar
+
+    r = preentrenar(a.datos, a.salida, epocas=a.epocas, tamano=a.tamano, lote=a.lote, base=a.base,
+                    niveles=a.niveles, iter_por_epoca=a.iter_por_epoca, lr=a.lr,
+                    clips_en_memoria=a.clips_en_memoria, semilla=a.semilla, hilos=a.hilos)
+    print(f"Mejor pérdida de reconstrucción en validación: {r['mejor_perdida_val']:.4f} "
+          f"(sin modelo {r['perdida_val_sin_modelo']:.4f})  → {a.salida}")
+
+
 def _cmd_entrenar(a):
     from .entrenamiento import entrenar
 
     r = entrenar(a.datos, a.salida, epocas=a.epocas, tamano=a.tamano, lote=a.lote, base=a.base,
-                 iter_por_epoca=a.iter_por_epoca, lr=a.lr, semilla=a.semilla, hilos=a.hilos)
+                 iter_por_epoca=a.iter_por_epoca, lr=a.lr, semilla=a.semilla, hilos=a.hilos, inicial=a.inicial)
     print(f"Mejor Dice medio en validación: {r['mejor_dice_medio']:.3f}  → {a.salida}")
 
 
@@ -165,6 +185,30 @@ def main(argv=None):
     s.add_argument("--semilla", type=int, default=0)
     s.set_defaults(func=_cmd_sintetico)
 
+    s = sub.add_parser("biblioteca", help="prepara clips sin anotar para el preentrenamiento")
+    s.add_argument("--origen", required=True, help="carpeta con los clips (se recorre con subcarpetas)")
+    s.add_argument("--salida", required=True)
+    s.add_argument("--max-frames", type=int, default=64, help="frames consecutivos por clip (tramo central)")
+    s.add_argument("--lado-max", type=int, default=384, help="px del lado mayor tras reducir")
+    s.add_argument("--umbral-color", type=float, default=0.003, help="fracción de píxeles en color para descartar")
+    s.add_argument("--sin-mosaicos", action="store_true", help="no generar las hojas de miniaturas")
+    s.set_defaults(func=_cmd_biblioteca)
+
+    s = sub.add_parser("preentrenar", help="preentrenamiento autosupervisado (sin anotación)")
+    s.add_argument("--datos", required=True, help="carpeta generada por 'qlus biblioteca'")
+    s.add_argument("--salida", required=True)
+    s.add_argument("--epocas", type=int, default=30)
+    s.add_argument("--tamano", type=int, default=256)
+    s.add_argument("--lote", type=int, default=8)
+    s.add_argument("--base", type=int, default=32)
+    s.add_argument("--niveles", type=int, default=4)
+    s.add_argument("--iter-por-epoca", type=int, default=200)
+    s.add_argument("--lr", type=float, default=1e-3)
+    s.add_argument("--clips-en-memoria", type=int, default=100, help="clips cargados por época (~7 MB c/u)")
+    s.add_argument("--hilos", type=int, default=None)
+    s.add_argument("--semilla", type=int, default=0)
+    s.set_defaults(func=_cmd_preentrenar)
+
     s = sub.add_parser("entrenar", help="entrena la segmentación")
     s.add_argument("--datos", required=True)
     s.add_argument("--salida", required=True)
@@ -176,6 +220,7 @@ def main(argv=None):
     s.add_argument("--lr", type=float, default=1e-3)
     s.add_argument("--hilos", type=int, default=None)
     s.add_argument("--semilla", type=int, default=0)
+    s.add_argument("--inicial", help="pesos iniciales (p. ej. de 'qlus preentrenar'); fija base y niveles")
     s.set_defaults(func=_cmd_entrenar)
 
     s = sub.add_parser("analizar", help="cuantifica un examen")

@@ -22,6 +22,8 @@ extensa, derrame, deslizamiento pleural y controles de calidad.
 - [Propuesta técnica](docs/propuesta-tecnica.md): física, arquitectura, normalización hepática,
   exclusión de sombras, fórmulas, validación y hoja de ruta.
 - [Guía de anotación](docs/guia-anotacion.md) y [etiquetas para CVAT](docs/etiquetas_cvat.json).
+- [Entrenamiento local con una biblioteca de clips sin anotar](docs/entrenamiento-local.md)
+  (Windows, paso a paso).
 
 ## Instalación
 
@@ -38,10 +40,15 @@ pytest
 qlus sintetico --salida datos/sinteticos --n 200
 qlus sintetico --tipo examen --salida datos/examen_demo
 
-# 2. Entrenar la segmentación (clips .npz "PACIENTE__zona.npz" con máscaras)
-qlus entrenar --datos datos/sinteticos --salida modelos/unet.pt --epocas 20
+# 2. Preentrenamiento autosupervisado con clips reales SIN anotar (DICOM/video, sin hígado)
+qlus biblioteca --origen "ruta/a/la/biblioteca" --salida datos/biblioteca
+qlus preentrenar --datos datos/biblioteca --salida modelos/preentrenado.pt
 
-# 3. Analizar un examen: clip hepático + zonas, con el rango dinámico del preset
+# 3. Entrenar la segmentación (clips .npz "PACIENTE__zona.npz" con máscaras)
+qlus entrenar --datos datos/sinteticos --salida modelos/unet.pt --epocas 20 \
+  --inicial modelos/preentrenado.pt   # opcional
+
+# 4. Analizar un examen: clip hepático + zonas, con el rango dinámico del preset
 qlus analizar --modelo modelos/unet.pt --rango-dinamico 60 \
   --higado datos/examen_demo/DEMO__higado.npz \
   --zona anterior_superior_der=datos/examen_demo/DEMO__anterior_superior_der.npz \

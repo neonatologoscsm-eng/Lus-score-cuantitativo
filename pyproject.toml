@@ -13,11 +13,13 @@ dependencies = [
     "scipy>=1.10",
     "opencv-python-headless>=4.8",
     "pydicom>=2.4",
+    "pillow>=10",          # decodifica DICOM comprimidos en JPEG (lo habitual en ecógrafos)
     "torch>=2.1",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+jpeg = ["pylibjpeg>=2", "pylibjpeg-libjpeg>=2"]  # DICOM en JPEG sin pérdida / JPEG-LS
 
 [project.scripts]
 qlus = "qlus.cli:main"

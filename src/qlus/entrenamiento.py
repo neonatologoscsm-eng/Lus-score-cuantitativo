@@ -8,6 +8,9 @@ frames del mismo niño entre ambos conjuntos.
 Aumentos de datos pensados para la variabilidad entre equipos: desplazamiento
 de ganancia (aditivo en gris), cambio de rango dinámico (escala), ruido,
 volteo horizontal y recorte/reescalado.
+
+Con `inicial` se parte de otro checkpoint (p. ej. el de `qlus preentrenar`): se
+copian los pesos que coinciden en nombre y forma, es decir, todo salvo la capa final.
 """
 
 from __future__ import annotations
@@ -44,6 +47,22 @@ def pila_temporal(frames: np.ndarray, t: int) -> np.ndarray:
     return np.stack([frames[max(t - 1, 0)], frames[t], frames[min(t + 1, T - 1)]])
 
 
+def aumentar(x: np.ndarray, y: np.ndarray | None, r: np.random.Generator):
+    """x (3, H, W) en gris 0–255; y (H, W) o None. Recorte, volteo, rango dinámico, ganancia y ruido."""
+    H, W = x.shape[1:]
+    esc = r.uniform(0.8, 1.0)
+    h, w = int(H * esc), int(W * esc)
+    y0, x0 = r.integers(0, H - h + 1), r.integers(0, W - w + 1)
+    x = x[:, y0:y0 + h, x0:x0 + w]
+    y = None if y is None else y[y0:y0 + h, x0:x0 + w]
+    if r.random() < 0.5:
+        x = x[:, :, ::-1]
+        y = None if y is None else y[:, ::-1]
+    x = (x - 128.0) * r.uniform(0.8, 1.25) + 128.0 + r.uniform(-25, 25)  # rango dinámico + ganancia
+    x = x + r.normal(0, r.uniform(0, 6), x.shape)
+    return np.clip(x, 0, 255).astype(np.float32), None if y is None else np.ascontiguousarray(y)
+
+
 class ConjuntoClips(torch.utils.data.Dataset):
     def __init__(self, rutas: list[Path], tamano: int, aumentar: bool, muestras: int | None = None,
                  semilla: int = 0):
@@ -73,23 +92,10 @@ class ConjuntoClips(torch.utils.data.Dataset):
         x = pila_temporal(c.frames, t).astype(np.float32)
         y = c.etiquetas[t]
         if self.aumentar:
-            x, y = self._aumentar(x, y)
+            x, y = aumentar(x, y, self.rng)
         x = np.stack([cv2.resize(ch, (self.tamano, self.tamano), interpolation=cv2.INTER_LINEAR) for ch in x])
         y = cv2.resize(y, (self.tamano, self.tamano), interpolation=cv2.INTER_NEAREST)
         return torch.from_numpy(x / 255.0), torch.from_numpy(y.astype(np.int64))
-
-    def _aumentar(self, x, y):
-        r = self.rng
-        H, W = y.shape
-        esc = r.uniform(0.8, 1.0)
-        h, w = int(H * esc), int(W * esc)
-        y0, x0 = r.integers(0, H - h + 1), r.integers(0, W - w + 1)
-        x, y = x[:, y0:y0 + h, x0:x0 + w], y[y0:y0 + h, x0:x0 + w]
-        if r.random() < 0.5:
-            x, y = x[:, :, ::-1], y[:, ::-1]
-        x = (x - 128.0) * r.uniform(0.8, 1.25) + 128.0 + r.uniform(-25, 25)  # rango dinámico + ganancia
-        x = x + r.normal(0, r.uniform(0, 6), x.shape)
-        return np.clip(x, 0, 255).astype(np.float32), np.ascontiguousarray(y)
 
 
 def pesos_clase(conjunto: ConjuntoClips) -> torch.Tensor:
@@ -130,9 +136,20 @@ def evaluar(modelo: nn.Module, cargador, dispositivo) -> dict:
     return {"dice": dice, "dice_medio": float(np.mean(list(dice.values())))}
 
 
+def cargar_pesos_iniciales(modelo: nn.Module, ruta: str | Path) -> int:
+    """Copia los pesos de otro checkpoint cuyo nombre y forma coincidan (p. ej. todo menos la capa
+    final de un preentrenamiento). Devuelve cuántos tensores se copiaron."""
+    estado = torch.load(str(ruta), map_location="cpu", weights_only=False)["estado"]
+    propio = modelo.state_dict()
+    comunes = {k: v for k, v in estado.items() if k in propio and propio[k].shape == v.shape}
+    modelo.load_state_dict(comunes, strict=False)
+    return len(comunes)
+
+
 def entrenar(carpeta: str | Path, salida: str | Path, epocas: int = 20, tamano: int = 256, lote: int = 8,
              base: int = 32, iter_por_epoca: int = 200, lr: float = 1e-3, frac_val: float = 0.2,
-             semilla: int = 0, hilos: int | None = None, registro=print) -> dict:
+             semilla: int = 0, hilos: int | None = None, inicial: str | Path | None = None,
+             registro=print) -> dict:
     torch.manual_seed(semilla)
     if hilos:
         torch.set_num_threads(hilos)
@@ -148,7 +165,15 @@ def entrenar(carpeta: str | Path, salida: str | Path, epocas: int = 20, tamano: 
     cl_va = torch.utils.data.DataLoader(ds_va, batch_size=lote, shuffle=False, num_workers=0)
 
     disp = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    modelo = UNet(canales_entrada=3, n_clases=N_CLASES, base=base).to(disp)
+    niveles = 4
+    if inicial:
+        cfg = torch.load(str(inicial), map_location="cpu", weights_only=False)["config"]
+        base, niveles = cfg["base"], cfg["niveles"]  # la arquitectura la fija el modelo inicial
+    modelo = UNet(canales_entrada=3, n_clases=N_CLASES, base=base, niveles=niveles)
+    if inicial:
+        n = cargar_pesos_iniciales(modelo, inicial)
+        registro(f"Pesos iniciales de {inicial}: {n}/{len(modelo.state_dict())} tensores")
+    modelo = modelo.to(disp)
     ce = nn.CrossEntropyLoss(weight=pesos_clase(ds_tr).to(disp), ignore_index=SIN_ANOTAR)
     opt = torch.optim.AdamW(modelo.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=epocas * iter_por_epoca)

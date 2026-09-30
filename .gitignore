@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.pt
-datos/
-salida/
-modelos/
-nnUNet_raw/
+/datos/
+/salida/
+/modelos/
+/nnUNet_raw/
