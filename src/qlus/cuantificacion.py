@@ -32,6 +32,7 @@ class Parametros:
     d0_mm: float = 0.5                   # inicio de la banda bajo la superficie pulmonar
     banda_mm: float = 15.0               # alto de la banda de medición
     umbral_subpleural_mm: float = 5.0    # consolidación ≤ 5 mm de profundidad = subpleural
+    min_area_consolidacion_mm2: float = 0.5  # componentes menores se descartan como ruido de segmentación
     percentil_vertical: float = 25.0
     umbral_patron_b: float = 0.5         # blancura de columna para contar como patrón B
     anclas_db: tuple[float, float] = ANCLAS_DB
@@ -111,11 +112,12 @@ def cuantificar_frame(gris: np.ndarray, etiquetas: np.ndarray, mm_por_pixel: tup
     cons_ext = np.zeros_like(cons_total)
     if n:
         f, c = np.nonzero(cons_total)
-        ref_sup = np.where(np.isfinite(s), s, np.nan)[c]
-        prof = (f - ref_sup) * my
+        prof = (f - s[c]) * my
         ids = comp[f, c]
         for i in range(1, n + 1):
             sel = ids == i
+            if sel.sum() * my * mx < p.min_area_consolidacion_mm2:
+                continue
             pmax = np.nanmax(prof[sel]) if np.isfinite(prof[sel]).any() else np.inf
             destino = cons_sub if pmax <= p.umbral_subpleural_mm else cons_ext
             destino[f[sel], c[sel]] = True
