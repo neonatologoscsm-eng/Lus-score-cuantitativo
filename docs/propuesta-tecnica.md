@@ -1,366 +1,291 @@
 # qLUS-Neo — Propuesta técnica para un LUS score neonatal totalmente cuantitativo
 
-> Documento de diseño. Estado: propuesta inicial (septiembre 2026).
+> Documento de diseño, versión 2 (septiembre 2026).
 > Objetivo: pasar de un score visual semicuantitativo (0–3 por zona, 0–18 total en el esquema de Brat)
 > a una medición continua, reproducible e independiente del observador, de la **pérdida de aireación
 > pulmonar** en ecografía pulmonar neonatal.
+
+## 0. Decisiones de diseño de esta versión
+
+1. **Score puramente ecográfico.** El resultado sale solo de la imagen. No hay pesos ajustados con
+   datos clínicos (oxigenación, surfactante, etc.): esos datos se usan únicamente para **validar** el
+   score, nunca para definirlo.
+2. **IA desde el inicio.** Una red neuronal segmenta cada píxel (qué es); una cuantificación
+   determinística y auditable calcula el número (cuánto).
+3. **Exclusión autónoma de las sombras costales** cuando aparecen en el clip, con tres capas
+   independientes (IA, intensidad y consistencia temporal).
+4. **Normalización con el hígado del propio paciente**, sin fantoma externo en la rutina.
 
 ---
 
 ## 1. La premisa física: qué mide realmente el "blanco"
 
-La intuición "más blanco = más líquido, más negro = más aire" es correcta **dentro de un rango**, pero
-tiene tres límites que el algoritmo debe resolver explícitamente:
+La intuición "más blanco = más líquido, más negro = más aire" es correcta **dentro de un rango**:
 
-1. **El pulmón no se "ve"; se ven artefactos.** El pulmón aireado refleja casi todo el ultrasonido en la
-   pleura y genera líneas A (reverberaciones horizontales). A medida que baja la fracción de aire
-   (líquido, colapso alveolar, inflamación, fibrosis) aparecen líneas B verticales que, al confluir,
-   producen el "pulmón blanco". Por lo tanto el blanco mide **pérdida de aire / aumento de densidad**,
-   no agua específicamente. En TTN es mayormente agua; en SDR es sobre todo colapso alveolar por
-   déficit de surfactante; en DBP hay componente fibrótico. Propuesta de nombre honesto para la
-   salida: **Índice de Pérdida de Aireación (IPA)**, con "% de blanco" como uno de sus componentes.
+- **El blanco mide pérdida de aire, no agua específicamente.** En TTN es mayormente agua; en SDR es
+  colapso alveolar; en DBP hay fibrosis. Nombre de la salida: **Índice de Pérdida de Aireación (IPA)**.
+- **La relación brillo–aire no es monótona:**
 
-2. **La relación brillo–aire no es monótona.** El continuo de densidad es:
+  | Estado | Aire | Imagen | Tratamiento en qLUS-Neo |
+  |---|---|---|---|
+  | Normal | Alto | Negro con líneas A | Blancura baja |
+  | Síndrome intersticial | ↓ | Líneas B separadas | Blancura intermedia |
+  | Pulmón blanco | ↓↓ | Líneas B confluentes | Blancura alta |
+  | Consolidación / atelectasia | ~0 | Gris tisular | Segmentada: cuenta como tejido sin aire (100 %) |
+  | Derrame pleural | — | Negro anecoico | Segmentado: excluido y reportado aparte |
+  | Neumotórax | Aire fuera del pulmón | Líneas A sin deslizamiento | Detectado en el video: zona no cuantificable |
 
-   | Estado | Aire | Aspecto en la imagen | ¿Qué haría un "contador de blancos" ingenuo? |
-   |---|---|---|---|
-   | Normal | Alto | Negro con líneas A horizontales | Bien (bajo) |
-   | Síndrome intersticial | ↓ | Líneas B separadas | Bien (intermedio) |
-   | Pulmón blanco | ↓↓ | Líneas B confluentes | Bien (alto) |
-   | **Consolidación / atelectasia** | ~0 | **Gris tisular** (tipo hígado), broncograma | **Mal: lo leería como "menos blanco" que el pulmón blanco** |
-   | **Derrame pleural** | — | **Negro anecoico** | **Mal: lo leería como "aire"** |
-   | **Neumotórax** | Aire fuera del pulmón | Líneas A, sin deslizamiento | **Mal: idéntico a "normal" en imagen estática** |
+- **El brillo depende del equipo y de la configuración.** Por eso preset bloqueado y normalización
+  con un tejido de referencia del mismo examen (sección 6).
 
-   Conclusión de diseño: **primero clasificar cada píxel (qué es), después medir (cuánto)**.
-
-3. **El brillo depende del equipo y de la configuración.** Ganancia, TGC, profundidad, foco,
-   frecuencia, rango dinámico, imagen armónica, compounding, filtros de speckle, persistencia, presión
-   y ángulo de la sonda cambian los niveles de gris y la visibilidad de las líneas B. Un "% de blanco"
-   solo es comparable si la adquisición está estandarizada y la intensidad está **calibrada**.
+Conclusión de diseño: **primero clasificar cada píxel (qué es), después medir (cuánto).**
 
 ---
 
-## 2. Arquitectura del sistema
+## 2. Arquitectura
 
 ```mermaid
 flowchart TD
-    A[Etapa 0: Adquisición estandarizada<br/>preset fijo, zonas definidas, clips de 3–6 s] --> B[Etapa 1: Control de calidad<br/>¿pleura visible? ¿ángulo? ¿ganancia en rango?]
-    B -->|rechazo| A
-    B --> C[Etapa 2: Segmentación anatómica<br/>pared, costillas, sombras, línea pleural,<br/>timo, corazón, hígado, bazo, diafragma]
-    C --> D[Etapa 3: Segmentación de hallazgos<br/>consolidación subpleural / extensa,<br/>broncograma, derrame]
-    D --> E[Etapa 4: Análisis temporal del clip<br/>deslizamiento, pulso pulmonar, punto pulmonar,<br/>selección y agregación de frames]
-    E --> F{¿Neumotórax?}
-    F -->|sí| G[Zona NO cuantificable<br/>alerta clínica]
-    F -->|no| H[Etapa 5: Cuantificación determinística<br/>normalización de intensidad + fórmulas]
-    H --> I[Etapa 6: Integración por paciente<br/>mapa torácico, heterogeneidad, gradientes,<br/>equivalente Brat, tendencias]
+    A[Adquisición estandarizada<br/>preset bloqueado · 6 zonas + clip hepático · clips 3–6 s] --> B[IA: segmentación por píxel<br/>U-Net con contexto temporal → nnU-Net]
+    B --> C[Suavizado temporal de probabilidades]
+    C --> D[Exclusión autónoma de sombras costales<br/>IA + intensidad + consistencia temporal]
+    C --> E[Referencia hepática del examen<br/>recta gris–profundidad]
+    D --> F{Deslizamiento pleural<br/>¿neumotórax?}
+    F -->|sí| G[Zona NO cuantificable · alerta]
+    F -->|no| H[Cuantificación determinística<br/>FBA · CPB · consolidaciones · IPA]
+    E --> H
+    H --> I[Informe por zona y examen<br/>+ láminas de control]
 ```
-
-Principio rector: **la IA decide QUÉ es cada píxel; una matemática explícita y auditable decide
-CUÁNTO**. Esto hace el resultado explicable, permite auditar cada número y facilita la vía regulatoria.
-
-### Etapa 0 — Adquisición estandarizada (sin esto nada es cuantitativo)
-
-- **Preset "LUS-Neo-Q" bloqueado** en cada equipo: sonda lineal de alta frecuencia (o "hockey stick"
-  en prematuros extremos), profundidad fija, un foco a nivel pleural, ganancia y TGC fijos,
-  **armónicas, compounding, reducción de speckle y persistencia desactivados**, sin autooptimización.
-- **Zonas**: las 6 de Brat (anterior superior, anterior inferior y lateral, por lado) como núcleo
-  obligatorio; opcional protocolo extendido con zonas posteriores (10–12 zonas) para capturar el
-  pulmón dependiente.
-- **Clips de video (3–6 s)**, no fotos: con FR neonatal de 40–60/min se capturan varios ciclos, y el
-  neumotórax solo se detecta en movimiento.
-- **Vista**: definir una sola vista por zona (p. ej., longitudinal perpendicular a las costillas con
-  "signo del murciélago", o transversal intercostal que evita las sombras costales). Mezclar vistas
-  introduce varianza.
-- **Formato**: DICOM sin compresión con pérdida (el JPEG altera los grises), sin calipers ni texto
-  sobre la imagen. Registrar equipo, sonda, preset, soporte ventilatorio, FiO2, SpO2, posición y edad
-  gestacional/posnatal.
-
-### Etapa 1 — Control de calidad en tiempo real
-
-Clasificador (ligero) que por frame estima: pleura visible y nítida, perpendicularidad (brillo y
-continuidad pleural, signo del murciélago), saturación (porcentaje de píxeles en 255 o en 0),
-movimiento excesivo, contacto parcial del transductor. Salida al operador: semáforo verde/rojo y
-motivo. Los frames de baja calidad no entran al cálculo.
-
-### Etapa 2 — Segmentación anatómica
-
-Clases: piel + tejido subcutáneo + músculo (pared torácica), costilla, **sombra acústica costal**,
-línea pleural, ROI pulmonar, y órganos no pulmonares relevantes en neonatos: **timo** (zonas
-anteriores superiores; puede imitar consolidación), **corazón** (anterior inferior izquierda),
-**hígado y bazo** (zonas inferiores/laterales), diafragma.
-
-- Método clásico viable para un MVP: la línea pleural es la primera interfase hiperecogénica
-  continua bajo la pared (detección por programación dinámica, transformada de Hough/Radon o
-  clustering); las costillas son arcos hiperecogénicos con sombra posterior, detectables como
-  columnas cuya intensidad media cae bruscamente bajo el arco.
-- Método IA recomendado: **nnU-Net** (autoconfigurable, funciona bien con cientos de frames
-  anotados) o U-Net con codificador preentrenado, con consistencia temporal entre frames.
-
-### Etapa 3 — Segmentación de hallazgos
-
-- **Consolidación subpleural**: área hipoecoica/tisular inmediatamente bajo la pleura con borde
-  profundo irregular ("shred sign"). Umbral de profundidad parametrizable (p. ej., < 5 o < 10 mm;
-  a definir con el equipo clínico y documentar).
-- **Consolidación extensa / atelectasia**: ecotextura tisular, con o sin broncograma aéreo
-  (dinámico o estático; se reporta como descriptor, no entra al score).
-- **Derrame pleural**: espacio anecoico entre pleura parietal y pulmón (signo del cuadrilátero;
-  signo sinusoidal en modo M). Se **excluye** del cálculo de aireación y se reporta aparte.
-
-### Etapa 4 — Análisis temporal
-
-- **Deslizamiento pleural**: flujo óptico en una banda alrededor de la pleura y "modo M sintético"
-  (reconstruido del clip B) para distinguir signo de la orilla de mar vs signo del código de barras.
-- **Pulso pulmonar** (latido transmitido) y **punto pulmonar** (transición deslizamiento/no
-  deslizamiento en el mismo campo).
-- **Regla de seguridad**: sin deslizamiento + sin líneas B + sin pulso pulmonar ⇒ probable
-  neumotórax ⇒ la zona se marca **"no cuantificable — sospecha de NTX"**, nunca como "0 % de
-  agua / normal".
-- **Agregación**: el valor de la zona es la mediana de los frames válidos del clip, reportando además
-  la variabilidad intra-clip (P25–P75). Opcional: gating respiratorio para medir siempre en la misma
-  fase.
 
 ---
 
-## 3. Cuantificación: fórmulas propuestas
+## 3. Adquisición estandarizada
 
-### 3.1 Región de interés (ROI)
+- **Preset "LUS-Neo-Q" bloqueado** en cada equipo: sonda lineal de alta frecuencia (o "hockey stick"
+  en prematuros extremos), profundidad fija, foco a nivel pleural, ganancia y TGC fijos, **mapa de
+  grises lineal**, **armónicas, compounding, reducción de speckle y persistencia desactivados**,
+  sin autooptimización. Registrar el **rango dinámico en dB** del preset.
+- **Zonas**: las 6 de Brat como núcleo; opcional protocolo extendido con zonas posteriores.
+- **Un clip de referencia hepática por examen** (sección 6), con el mismo preset y sin tocar la
+  ganancia.
+- **Clips de video de 3–6 s** (el neumotórax solo se detecta en movimiento), en DICOM sin compresión
+  con pérdida y sin calipers ni texto sobre la imagen.
+- Nombre de archivo: `PACIENTE__zona` (la partición de datos se hace por paciente).
 
-Para cada frame válido:
+---
 
-- `P(x)`: profundidad de la línea pleural en la columna `x`.
-- Columnas válidas: se excluyen columnas bajo costilla o sombra costal, bordes del transductor y
-  columnas con pleura no detectada con confianza.
-- ROI = franja de **profundidad fija bajo la pleura**, de `P(x) + d0` a `P(x) + d0 + D`
-  (p. ej., `d0` ≈ 0,5 mm y `D` ≈ 10–20 mm; valores a fijar en el protocolo y no cambiar).
-  Una ventana fija referida a la pleura hace comparables zonas, pacientes y días, y evita que la
-  atenuación con la profundidad sesgue el resultado.
-- Dentro de la ROI se enmascaran: derrame, órganos no pulmonares y cualquier píxel saturado o
-  fuera de campo.
+## 4. Segmentación con IA
 
-### 3.2 Normalización de intensidad ("blancura" calibrada)
+### 4.1 Ontología (una clase por píxel)
 
-```
-e(p) = clip( (I(p) − I_aire) / (I_blanco − I_aire), 0, 1 )
-```
+| ID | Clase | Uso en el cálculo |
+|---|---|---|
+| 0 | fondo | excluido |
+| 1 | pared torácica | control de ganancia entre clips |
+| 2 | costilla | excluye su columna |
+| 3 | sombra costal | excluye su columna |
+| 4 | línea pleural | define la banda de medición y el deslizamiento |
+| 5 | pulmón (con artefactos) | **blancura** |
+| 6 | consolidación | **tejido sin aire**; subpleural/extensa por profundidad |
+| 7 | derrame | excluido; espesor y área reportados |
+| 8 | hígado | **referencia de intensidad** |
+| 9 | bazo | excluido |
+| 10 | corazón | excluido |
+| 11 | timo | excluido (imita consolidación en zonas anteriores superiores) |
+| 12 | diafragma | excluido |
+| 13 | vaso anecoico | segundo ancla opcional (modo dos puntos) |
 
-- `I_aire` e `I_blanco` se obtienen por **calibración con fantoma** para cada equipo + sonda + preset.
-- Alternativa/complemento con **referencia interna** de la misma imagen: cociente entre la ecogenicidad
-  pulmonar y la de la pared torácica (análogo al índice hepatorrenal en esteatosis). Cuidado en
-  hidrops o edema de pared, donde la referencia cambia.
+Se usa **una sola clase de consolidación**: la distinción subpleural/extensa la hace la cuantificación
+por la profundidad medida, así los anotadores no tienen que decidirla y el criterio es explícito.
 
-### 3.3 Separar líneas B de líneas A
+### 4.2 Modelo y entrenamiento
 
-Las líneas A también son blancas, pero horizontales y periódicas. Dos rasgos simples y robustos:
+- **U-Net 2D con contexto temporal**: la entrada son los frames t−1, t y t+1 como tres canales, lo que
+  ayuda con la pleura y las líneas B que se mueven. Las probabilidades se **suavizan en el tiempo**
+  antes de decidir cada píxel (costillas, sombras e hígado no cambian entre frames).
+- **nnU-Net 2D** como modelo de producción: el repositorio exporta el conjunto en su formato, con
+  folds agrupados por paciente.
+- **Anotación dispersa**: basta anotar 1 de cada n frames; los demás sirven como contexto temporal.
+- **Aumentos de datos** que imitan la variabilidad entre equipos: ganancia (desplazamiento aditivo),
+  rango dinámico (escala), ruido, volteo y recorte.
+- **Preentrenamiento con clips sintéticos** (generador incluido, con máscaras exactas), luego
+  ajuste fino con clips neonatales anotados.
 
-- **Percentil bajo vertical** por columna (p. ej., P20 de `e` a lo largo de la profundidad de la ROI):
-  en patrón A hay huecos negros entre líneas A ⇒ P20 bajo; en líneas B la columna es blanca de arriba
-  a abajo ⇒ P20 alto.
-- **Índice de líneas A**: autocorrelación del perfil vertical con retardo igual a la distancia
-  piel–pleura (las líneas A se repiten a múltiplos de esa distancia).
+### 4.3 Métricas de la IA
 
-Esto permite construir un mapa de "blancura vertical" `b(p)` que no confunde reverberación
-horizontal (aire) con artefacto vertical (pérdida de aire).
+1. Dice por clase (en validación por paciente).
+2. **Sensibilidad por columna de las sombras costales** (una sombra no excluida parece pulmón
+   aireado y baja falsamente el IPA).
+3. **Métrica principal: concordancia del IPA calculado con las máscaras de la IA frente al IPA
+   calculado con las máscaras de expertos** (CCI, Bland–Altman). Si coinciden, la IA reemplaza la
+   anotación manual sin cambiar el score.
 
-### 3.4 Mapa de pérdida de aireación por píxel
+---
 
-```
-a(p) = 1          si p ∈ consolidación (tejido sin aire)
-a(p) = b(p)       si p ∈ pulmón con artefactos (0 = aireado, 1 = blanco confluente)
-p excluido        si p ∈ derrame, sombra costal, órgano no pulmonar, píxel saturado
-```
+## 5. Exclusión autónoma de las sombras costales
 
-### 3.5 Métricas por zona
+Una columna se excluye del cálculo si cumple cualquiera de estas condiciones:
+
+1. **IA**: la red segmenta costilla en la columna, o más de un 25 % de la columna bajo la pleura es
+   sombra.
+2. **Red de seguridad por intensidad** (por si la IA no ve la sombra): la línea pleural esperada,
+   interpolada desde las columnas vecinas, **no tiene brillo** (< 50 % del brillo pleural mediano) y
+   todo lo que está debajo es tanto o más oscuro que el pulmón vecino. El pulmón aireado también es
+   oscuro bajo la pleura, pero conserva una pleura brillante; la sombra no.
+3. **Consistencia temporal**: con la sonda quieta, una columna sombreada en ≥ 50 % de los frames se
+   excluye en todo el clip.
+
+Después se agrega un **margen lateral de 0,5 mm** para eliminar la penumbra. El informe registra
+qué fracción se excluyó y por qué vía, y la lámina de control muestra las columnas excluidas
+rayadas. Si quedan menos del 30 % de columnas válidas, el frame no se usa. En la vista transversal
+intercostal, sin costillas, no se excluye nada.
+
+---
+
+## 6. Normalización con el hígado del paciente
+
+### 6.1 Fundamento
+
+El modo B muestra la amplitud **comprimida en escala logarítmica**. Un cambio de ganancia desplaza
+todos los niveles de gris en la misma cantidad, así que la **diferencia de gris entre un píxel
+pulmonar y el hígado, convertida a dB, no depende de la ganancia**. Es la misma idea del índice
+hepatorrenal para esteatosis, pero en dB y corregida por profundidad.
+
+El hígado es un buen candidato porque es grande, homogéneo, sin aire, está en el mismo examen y se
+ve con la misma sonda y el mismo preset. Además, el pulmón consolidado ("hepatización") tiene una
+ecogenicidad cercana a la del hígado, lo que da un punto de comparación con sentido físico.
+
+| Referencia | Ventajas | Problemas | Rol |
+|---|---|---|---|
+| **Hígado** | Grande, homogéneo, accesible en la zona lateral/posterior derecha | Enfermedad hepática lo altera | **Principal** |
+| Bazo | Lado izquierdo | Más chico y profundo en neonatos | Alternativa futura |
+| Pared torácica | Está en todos los clips | Delgada, campo cercano, varía entre zonas | Solo control de ganancia |
+| Corteza renal | — | En neonatos es más ecogénica y variable | No usar |
+
+### 6.2 Protocolo y cálculo
+
+1. En cada examen se adquiere **un clip hepático** (receso costofrénico o zona lateral/posterior
+   derecha) con el preset bloqueado.
+2. La IA segmenta hígado y vasos; se usa el parénquima con un margen de 1 mm, sin vasos ni bordes.
+3. Como el gris cae con la profundidad (atenuación), se ajusta una **recta gris = a + b·profundidad**
+   sobre medianas por milímetro (robusta al speckle).
+4. Cada píxel pulmonar se compara con el hígado **a su misma profundidad**:
+   `r(p) = (gris(p) − gris_hígado(z)) × dB_por_gris`, con `dB_por_gris = rango dinámico / 255`.
+5. Blancura 0–1: `e(p) = clip((r − r_aire) / (r_blanco − r_aire), 0, 1)`. Las anclas `r_aire` y
+   `r_blanco` (en dB relativos al hígado) se fijan **una sola vez** con los datos de desarrollo
+   (pulmón con patrón A y líneas B confluentes, respectivamente) y luego se congelan. Son
+   constantes del método, no calibraciones por paciente. Valores provisionales: −20 y +15 dB.
+
+**Modo dos puntos (opcional)**: si además hay un vaso hepático anecoico no recortado a negro, el
+contraste hígado–sangre permite recuperar la escala dB/gris cuando el rango dinámico del preset es
+desconocido (otro equipo). Limitación: el lumen anecoico mide el piso de ruido del equipo, no una
+propiedad del tejido, así que el contraste debe medirse una vez por equipo.
+
+### 6.3 Controles automáticos
+
+- **Píxeles suficientes** de hígado útil; si no hay, el examen no se cuantifica.
+- **Saturación** > 2 % de la referencia → advertencia.
+- **Heterogeneidad** entre bloques de ~3 mm, tras corregir la profundidad, > 3 dB → advertencia
+  (posible lesión focal o vaso no segmentado).
+- **Cambio de ganancia entre clips**: si la pared torácica de una zona difiere > 3 dB de la del clip
+  hepático → advertencia (la normalización solo vale con el preset bloqueado).
+- **Extrapolación**: si la banda pulmonar sale del rango de profundidad cubierto por el hígado.
+
+### 6.4 Limitaciones y validación del hígado como referencia
+
+La ecogenicidad hepática neonatal **no tiene valores normales establecidos** y puede alterarse por
+congestión (insuficiencia cardíaca, hidrops), colestasis o enfermedad hepática asociada a nutrición
+parenteral, hepatomegalia, enfermedades de depósito, calcificaciones por infección congénita,
+hemangiomas o hematomas. Antes del uso clínico hay que medir, **una sola vez y en un estudio de
+validación**, cuánto varía la ecogenicidad hepática entre recién nacidos y en el mismo niño día a día
+(con un preset fijo y, solo para ese estudio, un fantoma de referencia). Esa variabilidad es el
+límite de precisión del IPA. En la rutina no se usa fantoma.
+
+---
+
+## 7. Cuantificación (determinística, puramente ecográfica)
+
+**Banda de medición**: en cada columna válida, desde 0,5 mm bajo la **superficie pulmonar**
+(visceral; así un derrame interpuesto no cuenta como pulmón) hasta 15 mm más abajo. La profundidad
+fija referida al pulmón hace comparables zonas, pacientes y días.
 
 | Métrica | Definición | Rango |
 |---|---|---|
-| **FBA** — Fracción de Blanco Aparente ("% agua aparente") | media de `b(p)` en la ROI no consolidada | 0–100 % |
-| **CPB** — Cobertura pleural por líneas B | % de la longitud pleural válida con patrón B | 0–100 % |
-| **CS** — Consolidación subpleural | % del área de ROI ocupada; nº de focos; profundidad máx. (mm) | — |
-| **CE** — Consolidación extensa | % del área de ROI; longitud pleural (mm) y profundidad total (mm) medidas en toda la imagen | — |
-| **IPA** — Índice de Pérdida de Aireación | ver fórmula abajo | 0–100 |
-| Línea pleural | espesor (mm), irregularidad (rugosidad), fragmentación (%) | — |
-| Derrame | presencia, profundidad máx. (mm), área (mm²) — **no entra al IPA** | — |
-| Neumotórax | probabilidad; si positivo, zona no cuantificable | — |
-| Calidad | % de columnas válidas, nº de frames válidos, variabilidad intra-clip | — |
+| **FBA** — Fracción de Blanco Aparente | Media de la blancura por columna (percentil 25 vertical) en el pulmón no consolidado | 0–100 |
+| **CPB** — Cobertura pleural por patrón B | % de columnas con blancura ≥ 0,5 | 0–100 % |
+| **Consolidación subpleural** | % de la banda; componentes con profundidad máxima ≤ 5 mm | % |
+| **Consolidación extensa** | % de la banda; componentes > 5 mm, con profundidad y largo reales | % , mm |
+| **IPA** — Índice de Pérdida de Aireación | `100 × [c_sub + c_ext + (1 − c_sub − c_ext) × FBA]` | 0–100 |
+| Derrame | Espesor máximo (mm) y área (mm²); **no entra al IPA** | — |
+| Deslizamiento | Movimiento horizontal bajo la superficie pulmonar menos el de la pared | ~0 en NTX |
+| Calidad | Frames válidos, columnas válidas, columnas excluidas por sombra y vía | — |
 
-**IPA, versión física** (interpretable como "% de la región explorada que perdió aire"):
-
-```
-c_s = fracción de la ROI válida ocupada por consolidación subpleural
-c_e = fracción de la ROI válida ocupada por consolidación extensa
-FBA = blancura media (0–1) en el resto de la ROI
-
-IPA_zona = 100 × [ c_s + c_e + (1 − c_s − c_e) × FBA ]
-```
-
-Aquí la consolidación pesa el máximo (tejido sin aire) por unidad de área, y la diferencia entre
-subpleural y extensa sale naturalmente de su tamaño. Como la ventana es de profundidad fija, una
-consolidación grande que la sobrepasa quedaría "techada"; por eso CE se reporta además con su
-extensión real medida en toda la imagen.
-
-**qLUS clínico ponderado** (pesos distintos, aprendidos, no inventados):
-
-```
-qLUS_zona = β1·FBA + β2·c_s + β3·c_e + β4·(extensión CE) + β5·(irregularidad pleural)
-```
-
-Los `β` se estiman por regresión contra un estándar fisiológico (S/F, OSI, índice de oxigenación,
-necesidad de surfactante, aireación regional por EIT) con validación cruzada, y se **congelan**
-antes de la validación externa. Así se responde con datos a "¿cuánto más pesa una consolidación
-extensa que una subpleural?".
-
-### 3.6 Integración por paciente
-
-- **qLUS global** = media de las zonas (igual peso, como en Brat) y, como alternativa, ponderada
-  por el volumen pulmonar aproximado de cada región.
-- **Heterogeneidad** = desviación estándar entre zonas (SDR tiende a ser homogéneo; SAM heterogéneo).
-- **Gradiente superior/inferior** (TTN suele predominar en campos inferiores, "doble punto pulmonar")
-  y **gradiente anterior/posterior** (pulmón dependiente) cuando hay zonas posteriores.
-- **Equivalente Brat** (0–3 por zona, 0–18 total) calculado a partir de las métricas continuas, solo
-  para comparación y adopción clínica.
-- **Tendencias**: ΔqLUS antes/después de surfactante, cambios de PEEP, reclutamiento, extubación.
-
-Ejemplo de salida por zona:
-
-```json
-{
-  "zona": "anterior_superior_derecha",
-  "calidad": {"frames_validos": 58, "columnas_validas_pct": 82, "semaforo": "verde"},
-  "neumotorax": {"probabilidad": 0.02, "deslizamiento": true},
-  "derrame": {"presente": false},
-  "FBA_pct": 47.3,
-  "CPB_pct": 71.0,
-  "consolidacion_subpleural": {"area_roi_pct": 6.1, "focos": 3, "prof_max_mm": 3.2},
-  "consolidacion_extensa": {"area_roi_pct": 0.0},
-  "pleura": {"espesor_mm": 0.9, "irregularidad": 0.34},
-  "IPA": 50.5,
-  "IPA_P25_P75": [47.8, 53.1],
-  "equivalente_brat": 2
-}
-```
+- **Percentil 25 vertical**: las líneas A tienen huecos negros entre ellas (percentil bajo); las
+  líneas B son blancas de arriba a abajo (percentil alto). Así la reverberación horizontal del pulmón
+  aireado no se confunde con pérdida de aire.
+- **Consolidaciones**: cada píxel consolidado cuenta como 100 % sin aire. La diferencia entre
+  subpleural y extensa resulta de su **área y profundidad medidas**, no de pesos asignados.
+- **Neumotórax**: sin deslizamiento, con CPB ≤ 5 % y sin consolidación ⇒ **"no cuantificable —
+  sospecha de NTX"**, nunca "0 % / normal".
+- **Agregación**: mediana de los frames válidos del clip, con P25–P75. **IPA global** = media de las
+  zonas cuantificadas; **heterogeneidad** = desviación estándar entre zonas.
+- Todos los umbrales (5 mm, 15 mm, P25, 0,5) son parámetros explícitos del método: se fijan antes de
+  la validación y se reportan.
 
 ---
 
-## 4. ¿IA o reglas? Enfoque híbrido
+## 8. Validación (los datos clínicos validan, no definen)
 
-| Tarea | Método clásico (sin IA) | Método IA | Recomendación |
-|---|---|---|---|
-| Línea pleural | Programación dinámica, Hough/Radon, clustering | U-Net / nnU-Net | Clásico en MVP; IA después |
-| Costillas y sombras | Perfiles de intensidad por columna | Segmentación | Clásico suele bastar |
-| Timo, corazón, hígado, bazo | Difícil | Segmentación + contexto de zona | IA |
-| Consolidaciones y derrame | Difícil y frágil | nnU-Net | IA |
-| Líneas A / B | Percentil vertical, autocorrelación, Radon | Detección débilmente supervisada | Ambos (el clásico da explicabilidad) |
-| Deslizamiento / NTX | Flujo óptico, modo M sintético | Clasificador temporal (3D CNN / transformer de video) | Híbrido |
-| **Cuantificación final** | **Fórmulas explícitas** | — | **Siempre determinística** |
-
-Datos limitados: usar aprendizaje semisupervisado o autosupervisado sobre clips sin etiquetar,
-aumento de datos que simule cambios de ganancia/equipo, y aprendizaje activo (el modelo propone qué
-frames anotar).
+1. **Técnica**: reproducibilidad test–retest entre operadores (CCI, Bland–Altman); estabilidad
+   frente a la ganancia; concordancia del IPA con máscaras de IA frente a máscaras de expertos.
+2. **Referencia hepática**: variabilidad entre sujetos y día a día (sección 6.4).
+3. **Preclínica**: modelos animales pretérmino frente a agua pulmonar gravimétrica, TC y EIT.
+4. **Clínica**: validez convergente con S/F, OSI, índice de oxigenación, necesidad de surfactante,
+   EIT y evolución. El score **no se reajusta** con estos datos; se informan tal como resultan.
+   Reporte según TRIPOD+AI y CLAIM; DECIDE-AI para la fase de impacto clínico.
 
 ---
 
-## 5. Datos y anotación
-
-- **Cohorte piloto**: 50–100 recién nacidos con espectro amplio (sanos, TTN, SDR, SAM, neumonía,
-  NTX, derrame, DBP en evolución), exámenes seriados, al menos 2 equipos distintos.
-- **Anotación**: herramienta tipo CVAT, 3D Slicer o Label Studio; 2–3 anotadores con adjudicación;
-  medir concordancia entre anotadores (Dice para máscaras, kappa para etiquetas de clip).
-  Etiquetas por frame (máscaras) y por clip (NTX, deslizamiento, punto pulmonar, score de Brat de
-  cada experto).
-- **Orden de magnitud**: 500–1.000 frames con máscaras bastan para arrancar nnU-Net; miles de clips
-  con etiquetas de clip para el módulo temporal.
-- **Ética y privacidad**: aprobación del comité de ética, consentimiento según normativa local,
-  anonimización DICOM (incluido texto quemado en la imagen).
-- **Partición por paciente** (nunca por frame) en entrenamiento/validación/prueba, y un **centro o
-  equipo completamente externo** reservado para validación.
-
----
-
-## 6. Validación: "objetivo" se demuestra, no se declara
-
-Validar contra el score de Brat de expertos no alcanza: el objetivo es superarlo. Se propone una
-validación en tres niveles.
-
-1. **Técnica (banco de pruebas)**
-   - Fantomas pulmonares con fracción de líquido conocida (espumas/esponjas o gelatinas con
-     microburbujas) ⇒ curva de calibración intensidad–contenido de líquido por equipo y preset.
-   - Robustez: repetir con ganancia ± y distintos operadores; test–retest (CCI, Bland–Altman).
-2. **Preclínica (animal)**
-   - Modelos pretérmino (cordero, lechón, conejo) con lavado de surfactante o sobrecarga de volumen.
-   - Estándares de oro: agua pulmonar gravimétrica (peso húmedo/seco), TC con fracciones de aireación
-     por unidades Hounsfield, EIT y curvas presión–volumen.
-3. **Clínica neonatal**
-   - Correlación con S/F, OSI, índice de oxigenación, a/A; predicción de surfactante y de fracaso de
-     CPAP; evolución a DBP; aireación regional por EIT.
-   - Reproducibilidad entre operadores (mismo paciente, dos operadores, minutos de diferencia).
-   - Análisis preespecificado y reporte según TRIPOD+AI, CLAIM y, para la fase de impacto clínico,
-     DECIDE-AI.
-
----
-
-## 7. Estado del arte (para no reinventar y ubicar el aporte)
-
-- Análisis de escala de grises asistido por computador en neonatos, comparado con la evaluación
-  visual y con índices de oxigenación (Raimondi y cols., PLoS One 2018).
-- Q-LUS por valor medio de gris en corderos pretérmino: correlación moderada con volumen pulmonar
-  (super-jeringa y EIT) y detección de histéresis (Sett y cols., Pediatr Res 2022).
-- Análisis computarizado de la región pleural y subpleural (valor medio de gris y texturas de segundo
-  orden) en prematuros < 32 semanas correlacionado con OSI y S/F (Sci Rep 2026).
-- Adultos: Q-LUS por niveles de gris correlacionado con agua pulmonar extravascular por
-  termodilución (Corradi y cols., Chest 2016); algoritmo automático de cuantificación de líneas B
-  referido a la línea pleural, QLUSS (Brusasco y cols., Crit Care 2019).
-- Física: los parámetros de imagen modifican las líneas B (Mento y Demi, JASA 2020; ERJ Open Res
-  2025); espectroscopía pulmonar con datos multifrecuencia.
-- Datos crudos: reconstrucción de mapas de aireación y % de aireación desde RF con redes neuronales
-  (Luna, 2025; error ~9 % en pulmón porcino ex vivo).
-- IA neonatal: clasificación de video neonatal con concordancia humano–IA (Comput Biol Med 2024);
-  segmentación con estimación de movimiento y reglas explicables (Comput Biol Med 2025); detección
-  interpretable de rasgos y deslizamiento pleural neonatal con detectores de objetos.
-- Consenso ESICM–ESPNIC 2025 sobre LUS "cuantitativo" (scores) en UCI adulta, pediátrica y neonatal,
-  y su crítica "¿se adelantan los expertos a la evidencia?".
-
-**Brecha que ocupa este proyecto**: ningún sistema neonatal publicado integra a la vez
-(a) exclusión anatómica (costillas, timo, corazón, vísceras), (b) tratamiento diferenciado de
-consolidación, derrame y neumotórax, (c) calibración de intensidad entre equipos y (d) un score
-continuo por zona validado contra fisiología.
-
----
-
-## 8. Hoja de ruta
+## 9. Hoja de ruta (IA desde el inicio)
 
 | Fase | Contenido | Entregable |
 |---|---|---|
-| **0. Protocolo** | Preset bloqueado, vistas, zonas, clips, registro de variables, comité de ética, fantoma | Protocolo de adquisición + primeros datos |
-| **1. MVP sin IA (semiautomático)** | Detección de pleura y sombras (con corrección manual), ROI, normalización, FBA y CPB | Primer análisis retrospectivo vs Brat y S/F (publicable) |
-| **2. IA de segmentación y temporal** | nnU-Net para anatomía y hallazgos; módulo de deslizamiento/NTX | IPA completo, automático |
-| **3. Ponderación y validación** | Aprendizaje de `β`, validación prospectiva, test–retest, multicéntrico y multiequipo | qLUS-Neo validado |
-| **4. Producto** | App en tiempo real (inferencia en el borde), informe y tendencias, vía regulatoria (software como dispositivo médico) | Versión clínica / estudio de impacto |
+| **0. Protocolo y datos** | Preset bloqueado, clip hepático, comité de ética, anonimización, proyecto CVAT con la ontología | Primeros 20–30 pacientes con clips |
+| **1. Segmentación IA** | Preentrenamiento sintético + ajuste fino con anotación dispersa; U-Net y nnU-Net con folds por paciente | Modelo con Dice, sensibilidad de sombras y concordancia de IPA IA vs experto |
+| **2. Movimiento** | Sustituir el índice de deslizamiento heurístico por un modelo temporal entrenado (deslizamiento, punto pulmonar, pulso) | Detector de NTX validado |
+| **3. Validación** | Fijar anclas y umbrales; test–retest; variabilidad hepática; validez convergente multicéntrica | qLUS-Neo validado |
+| **4. Producto** | Inferencia en tiempo real en tablet/PC, informe y tendencias, vía regulatoria | Versión clínica |
 
 ---
 
-## 9. Stack técnico sugerido
+## 10. Implementación actual (este repositorio)
 
-- Procesamiento: Python, NumPy, OpenCV, scikit-image, pydicom.
-- IA: PyTorch + MONAI, nnU-Net; exportación a ONNX para inferencia en tablet/PC.
-- Captura: DICOM desde el equipo/PACS, tarjeta de captura de video, o SDK de sondas portátiles que
-  permitan acceso a datos (idealmente IQ/RF para una fase futura de ultrasonido cuantitativo).
-- App: backend de análisis (p. ej., FastAPI) + interfaz web o tablet con superposición de máscaras,
-  mapa torácico y gráfico de tendencias.
+| Módulo | Contenido |
+|---|---|
+| `src/qlus/etiquetas.py` | Ontología de 14 clases y colores |
+| `src/qlus/io.py` | DICOM (con regiones de ultrasonido y tamaño de píxel), video y `.npz` |
+| `src/qlus/sintetico.py` | Generador de clips sintéticos con máscaras exactas |
+| `src/qlus/modelos/unet.py` | U-Net 2D con contexto temporal |
+| `src/qlus/entrenamiento.py` · `inferencia.py` | Entrenamiento (partición por paciente, anotación dispersa) e inferencia con suavizado temporal |
+| `src/qlus/postproceso.py` | Línea pleural y exclusión autónoma de sombras costales |
+| `src/qlus/normalizacion.py` | Referencia hepática (uno y dos puntos) |
+| `src/qlus/cuantificacion.py` | FBA, CPB, consolidaciones, derrame, deslizamiento, IPA |
+| `src/qlus/anotacion.py` · `nnunet.py` | Importación de máscaras (CVAT, etc.) y exportación a nnU-Net v2 |
+
+Ver el `README.md` para los comandos.
 
 ---
 
-## 10. Riesgos y trampas conocidas
+## 11. Riesgos y trampas conocidas
 
-- **Saturación**: si la ganancia satura el pulmón blanco, el índice tiene techo. Calibrar para que la
-  línea pleural no quede en 255.
-- **Timo** confundido con consolidación en zonas anteriores superiores; **corazón** en anterior
-  inferior izquierda.
-- **Presión y ángulo** de la sonda: el control de calidad debe rechazar frames oblicuos.
-- **Edema de pared / hidrops**: altera la referencia interna de intensidad.
-- **Cambio de dominio** entre equipos: calibración por fantoma + validación externa obligatoria.
-- **Sobreajuste** de los pesos clínicos: preespecificar, validación cruzada, congelar antes de la
-  validación externa.
-- **Neumotórax leído como normal**: por eso la regla de seguridad del módulo temporal es obligatoria.
+- **Saturación**: si la ganancia satura el pulmón blanco, el índice tiene techo.
+- **Timo** confundido con consolidación; **corazón** en zona anterior inferior izquierda.
+- **Presión y ángulo** de la sonda: frames oblicuos deben descartarse.
+- **Cambio de ganancia entre clips**: rompe la normalización; se advierte automáticamente.
+- **Hígado anormal**: la referencia pierde validez; se advierte por heterogeneidad, pero no detecta
+  cambios difusos. Registrar la patología hepática conocida.
+- **Cambio de dominio** entre equipos: validación externa obligatoria.
+- **Sintético ≠ real**: el generador sirve para probar la tubería y preentrenar, no para validar.
 
 ---
 
@@ -401,6 +326,8 @@ continuo por zona validado contra fisiología.
     evidence? *Intensive Care Med.* 2025. <https://pubmed.ncbi.nlm.nih.gov/40658242/>
 15. Characteristics of scores used for quantitative lung ultrasound in neonates: a systematic review.
     <https://pmc.ncbi.nlm.nih.gov/articles/PMC12000906/>
+16. Isensee F, Jaeger PF, Kohl SAA, et al. nnU-Net: a self-configuring method for deep learning-based
+    biomedical image segmentation. *Nat Methods.* 2021;18:203-11.
 
 > Nota: las referencias 4, 8 y 11 se verificaron por título, revista y año; antes de citarlas en un
 > manuscrito conviene completar autores y paginación desde el texto completo.

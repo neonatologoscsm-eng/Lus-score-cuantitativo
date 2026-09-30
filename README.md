@@ -1,18 +1,65 @@
 # qLUS-Neo — LUS score neonatal cuantitativo
 
-Proyecto para desarrollar un algoritmo que entregue un score de ecografía pulmonar neonatal
-**continuo, objetivo y reproducible**, en lugar del score visual semicuantitativo (0–3 por zona)
-tipo Brat.
+Algoritmo para obtener un score de ecografía pulmonar neonatal **continuo, objetivo y puramente
+ecográfico**, en lugar del score visual semicuantitativo (0–3 por zona) tipo Brat.
 
-Idea central: medir la **pérdida de aireación** de cada zona pulmonar a partir de la "blancura"
-calibrada de la imagen, después de:
+- **La IA segmenta** cada píxel: pared, costillas, sombras costales, pleura, pulmón, consolidación,
+  derrame, hígado, timo, corazón, etc.
+- **La cuantificación es determinística**: mide la "blancura" del pulmón en una banda fija bajo la
+  pleura, cuenta la consolidación como tejido sin aire, excluye derrame y sombras, y marca el
+  neumotórax como no cuantificable.
+- **Las sombras costales se eliminan de forma autónoma** (IA + red de seguridad por intensidad +
+  consistencia temporal).
+- **La intensidad se normaliza con el hígado del propio paciente** (clip hepático del mismo examen),
+  sin fantoma externo.
 
-- identificar la línea pleural y el parénquima pulmonar,
-- excluir las sombras acústicas costales y los órganos no pulmonares (timo, corazón, hígado, bazo),
-- ponderar de forma distinta las consolidaciones subpleurales y extensas,
-- separar el derrame pleural y detectar el neumotórax (que no debe leerse como "pulmón normal").
+Salida principal por zona y examen: **IPA — Índice de Pérdida de Aireación (0–100)**, con FBA
+(fracción de blanco aparente), CPB (cobertura pleural por patrón B), consolidación subpleural y
+extensa, derrame, deslizamiento pleural y controles de calidad.
 
 ## Documentación
 
-- [Propuesta técnica](docs/propuesta-tecnica.md): premisa física, arquitectura, fórmulas,
-  estrategia IA/reglas, datos, validación, estado del arte y hoja de ruta.
+- [Propuesta técnica](docs/propuesta-tecnica.md): física, arquitectura, normalización hepática,
+  exclusión de sombras, fórmulas, validación y hoja de ruta.
+- [Guía de anotación](docs/guia-anotacion.md) y [etiquetas para CVAT](docs/etiquetas_cvat.json).
+
+## Instalación
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+## Uso
+
+```bash
+# 1. Datos sintéticos para probar la tubería y preentrenar
+qlus sintetico --salida datos/sinteticos --n 200
+qlus sintetico --tipo examen --salida datos/examen_demo
+
+# 2. Entrenar la segmentación (clips .npz "PACIENTE__zona.npz" con máscaras)
+qlus entrenar --datos datos/sinteticos --salida modelos/unet.pt --epocas 20
+
+# 3. Analizar un examen: clip hepático + zonas, con el rango dinámico del preset
+qlus analizar --modelo modelos/unet.pt --rango-dinamico 60 \
+  --higado datos/examen_demo/DEMO__higado.npz \
+  --zona anterior_superior_der=datos/examen_demo/DEMO__anterior_superior_der.npz \
+  --zona lateral_der=datos/examen_demo/DEMO__lateral_der.npz \
+  --figuras salida/figuras --salida salida/resultado.json
+
+# Datos reales: clip DICOM + máscaras exportadas de CVAT → .npz
+qlus importar --clip clip.dcm --mascaras export/SegmentationClass/ --salida datos/P001__lateral_der.npz
+
+# Exportar a nnU-Net v2 (folds agrupados por paciente)
+qlus exportar-nnunet --datos datos/reales --salida nnUNet_raw
+```
+
+Con `--comparar` (y clips anotados), `analizar` informa el IPA calculado con las máscaras de la IA
+junto al calculado con las del experto: es la métrica clave para aceptar el modelo.
+
+## Estado
+
+Tubería completa probada con datos sintéticos. **Aún no hay validación con clips reales**: las anclas
+de la escala (−20/+15 dB respecto al hígado) y los umbrales son provisionales y se fijarán con los
+datos de desarrollo antes de cualquier uso clínico. Uso exclusivo de investigación.

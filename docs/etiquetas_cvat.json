@@ -1,0 +1,86 @@
+[
+ {
+  "name": "pared_toracica",
+  "color": "#785a3c",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "costilla",
+  "color": "#ffffff",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "sombra_costal",
+  "color": "#5a5a5a",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "linea_pleural",
+  "color": "#ffdc00",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "pulmon",
+  "color": "#00aaff",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "consolidacion",
+  "color": "#e61e1e",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "derrame",
+  "color": "#283cff",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "higado",
+  "color": "#963c14",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "bazo",
+  "color": "#aa50aa",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "corazon",
+  "color": "#ff78a0",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "timo",
+  "color": "#ffa03c",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "diafragma",
+  "color": "#dcdc8c",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "vaso_anecoico",
+  "color": "#005a5a",
+  "type": "any",
+  "attributes": []
+ },
+ {
+  "name": "ignorar",
+  "color": "#ff00ff",
+  "type": "any",
+  "attributes": []
+ }
+]
