@@ -58,6 +58,19 @@ qlus exportar-nnunet --datos datos/reales --salida nnUNet_raw
 Con `--comparar` (y clips anotados), `analizar` informa el IPA calculado con las máscaras de la IA
 junto al calculado con las del experto: es la métrica clave para aceptar el modelo.
 
+## Demostración con datos sintéticos
+
+U-Net liviana (1,9 M parámetros) entrenada 10 épocas en CPU con 160 clips sintéticos: Dice medio
+de validación 0,94 (sombra costal 0,99, pleura 0,87, consolidación 0,94, derrame 0,94, hígado 0,99).
+En un examen sintético nuevo (hígado + 6 zonas), el IPA calculado con la segmentación de la IA
+difiere menos de 1 punto del calculado con las máscaras exactas en todas las zonas, y la zona con
+neumotórax queda "no cuantificable" en ambos casos.
+
+![Láminas de control: consolidación subpleural, consolidación extensa y neumotórax; columnas
+excluidas por sombra costal en rayado](docs/img/ejemplo_ia_sintetico.png)
+
+Esto demuestra que la tubería funciona de punta a punta; **no** demuestra desempeño en clips reales.
+
 ## Estado
 
 Tubería completa probada con datos sintéticos. **Aún no hay validación con clips reales**: las anclas
